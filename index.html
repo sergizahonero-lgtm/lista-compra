@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>🛒 Nuestra Lista</title>
+<title>🛒 Lista de la Comprita</title>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #faf7f2; --card: #ffffff; --primary: #e8533a; --primary-light: #fde8e4;
+    --bg: #faf7f2; --card: #ffffff; --primary: #2563eb; --primary-light: #dbeafe;
     --accent: #2d5a3d; --accent-light: #e4efe7; --text: #1a1a1a; --muted: #999;
     --border: #ece9e3; --shadow: 0 2px 16px rgba(0,0,0,0.08); --radius: 16px;
   }
@@ -79,8 +79,9 @@
   .toast.show { transform: translateX(-50%) translateY(0); }
 
   .sync-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4caf50; margin-right: 6px; animation: pulse 2s infinite; }
-  .sync-dot.syncing { background: #ff9800; }
+  .sync-dot.syncing { background: #ff9800; animation: none; }
   .sync-dot.error { background: #f44336; animation: none; }
+  .sync-dot.idle { background: #aaa; animation: none; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
@@ -88,7 +89,7 @@
 
 <div class="header">
   <span class="header-emoji">🛒</span>
-  <h1>Nuestra Lista</h1>
+  <h1>Lista de la Comprita</h1>
   <p><span class="sync-dot" id="sync-dot"></span><span id="sync-label">Conectando...</span></p>
 </div>
 
@@ -123,8 +124,13 @@
 const BIN_URL = 'https://api.jsonbin.io/v3/b/69ed65bc856a6821897219e9';
 const API_KEY = '$2a$10$B4VCDn2WklEhGW5vFlkQguB.7iNHCKEjQ92xqqQwc29HHIicuIC1y';
 
+// Smart sync intervals
+const SYNC_ACTIVE = 10000;   // 10s when app is open and being used
+const SYNC_IDLE   = 30000;   // 30s when open but not interacting
+const SYNC_HIDDEN = null;    // Stop when tab/app is in background
+
 const CATEGORIES = [
-  { id: 'frutas',    name: '🍎 Frutas',    color: '#e8533a' },
+  { id: 'frutas',    name: '🍎 Frutas',    color: '#2563eb' },
   { id: 'verduras',  name: '🥦 Verduras',  color: '#2d5a3d' },
   { id: 'lacteos',   name: '🥛 Lácteos',   color: '#5b8dd9' },
   { id: 'carnes',    name: '🥩 Carnes',    color: '#c0392b' },
@@ -139,6 +145,10 @@ let selectedCat = 'otros';
 let filterCat = 'all';
 let isSaving = false;
 let lastVersion = null;
+let syncTimer = null;
+let lastActivity = Date.now();
+
+// --- Sync logic ---
 
 function setSyncStatus(status) {
   const dot = document.getElementById('sync-dot');
@@ -147,17 +157,41 @@ function setSyncStatus(status) {
   if (status === 'ok')      { label.textContent = 'Compartida en tiempo real'; }
   if (status === 'syncing') { dot.classList.add('syncing'); label.textContent = 'Guardando...'; }
   if (status === 'error')   { dot.classList.add('error');   label.textContent = 'Sin conexión'; }
+  if (status === 'idle')    { dot.classList.add('idle');    label.textContent = 'En pausa'; }
+}
+
+function recordActivity() {
+  lastActivity = Date.now();
+  restartSyncTimer(SYNC_ACTIVE);
+}
+
+function restartSyncTimer(interval) {
+  if (syncTimer) clearInterval(syncTimer);
+  if (!interval) return;
+  syncTimer = setInterval(async () => {
+    const isIdle = Date.now() - lastActivity > 60000; // idle after 1 min no interaction
+    if (isIdle) {
+      restartSyncTimer(SYNC_IDLE);
+    }
+    await loadFromCloud();
+  }, interval);
 }
 
 async function loadFromCloud() {
+  if (document.hidden) { setSyncStatus('idle'); return; }
   try {
     const res = await fetch(BIN_URL + '/latest', { headers: { 'X-Master-Key': API_KEY } });
     const data = await res.json();
     const newVersion = data.metadata?.version;
     if (newVersion !== lastVersion) {
       lastVersion = newVersion;
-      items = data.record?.items || [];
-      render();
+      const newItems = data.record?.items || [];
+      // Only re-render if data actually changed
+      if (JSON.stringify(newItems) !== JSON.stringify(items)) {
+        items = newItems;
+        render();
+        if (lastVersion !== null) showToast('📲 Lista actualizada');
+      }
     }
     setSyncStatus('ok');
   } catch(e) { setSyncStatus('error'); }
@@ -182,6 +216,24 @@ async function saveToCloud() {
   }
   isSaving = false;
 }
+
+// Pause sync when app goes to background, resume when it comes back
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (syncTimer) clearInterval(syncTimer);
+    setSyncStatus('idle');
+  } else {
+    loadFromCloud(); // immediate sync on return
+    restartSyncTimer(SYNC_ACTIVE);
+    recordActivity();
+  }
+});
+
+// Track user interaction
+document.addEventListener('touchstart', recordActivity);
+document.addEventListener('click', recordActivity);
+
+// --- App logic ---
 
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -292,11 +344,10 @@ function selectCat(id) { selectedCat = id; buildCatSelect(); }
 document.getElementById('item-input').addEventListener('keydown', e => { if (e.key==='Enter') addItem(); });
 document.getElementById('qty-input').addEventListener('keydown', e => { if (e.key==='Enter') addItem(); });
 
-// Sync every 5 seconds
-setInterval(loadFromCloud, 5000);
-
+// Init
 buildCatSelect();
 loadFromCloud();
+restartSyncTimer(SYNC_ACTIVE);
 </script>
 </body>
 </html>
